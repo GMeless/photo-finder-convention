@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Retrouvez vos photos</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; background: #111; color: #eee; }
+  h1 { font-size: 20px; text-align: center; }
+  #camera-wrap { position: relative; border-radius: 12px; overflow: hidden; background: #000; }
+  video, canvas { width: 100%; display: block; }
+  #consent { font-size: 13px; color: #aaa; margin: 12px 0; line-height: 1.5; }
+  button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 10px;
+           background: #2d7dfb; color: white; margin-top: 12px; cursor: pointer; }
+  button:disabled { background: #555; }
+  #status { text-align: center; margin: 12px 0; font-size: 14px; color: #aaa; }
+  #gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+  .photo-card { position: relative; }
+  .photo-card img { width: 100%; border-radius: 8px; display: block; }
+  .filename { font-size: 11px; color: #999; text-align: center; margin-top: 4px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dl-btn { display: block; text-align: center; margin-top: 4px; padding: 8px; font-size: 13px;
+            background: #2a2a2a; color: #eee; border-radius: 6px; text-decoration: none; }
+  #downloadAll { display: none; background: #22a559; }
+</style>
+</head>
+<body>
+  <h1>Retrouvez vos photos</h1>
+  <p id="consent">
+    En prenant un selfie, vous acceptez qu'il soit comparé aux photos de l'événement
+    afin de retrouver celles où vous apparaissez. Le selfie n'est pas conservé après la recherche.
+  </p>
+
+  <div id="camera-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas" style="display:none"></canvas>
+  </div>
+
+  <button id="shoot">Prendre le selfie</button>
+  <button id="retry" style="display:none; background:#444;">Reprendre</button>
+
+  <div id="status"></div>
+  <button id="downloadAll">Télécharger toutes les photos (ZIP)</button>
+  <div id="gallery"></div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const shootBtn = document.getElementById('shoot');
+const retryBtn = document.getElementById('retry');
+const statusEl = document.getElementById('status');
+const gallery = document.getElementById('gallery');
+const downloadAllBtn = document.getElementById('downloadAll');
+
+let currentMatches = [];
+
+navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+  .then(stream => { video.srcObject = stream; })
+  .catch(() => { statusEl.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations."; });
+
+shootBtn.onclick = () => {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  video.style.display = 'none';
+  canvas.style.display = 'block';
+  shootBtn.style.display = 'none';
+  retryBtn.style.display = 'block';
+  gallery.innerHTML = '';
+  downloadAllBtn.style.display = 'none';
+  currentMatches = [];
+  statusEl.textContent = 'Recherche en cours...';
+
+  canvas.toBlob(blob => {
+    const form = new FormData();
+    form.append('file', blob, 'selfie.jpg');
+    fetch('/search', { method: 'POST', body: form })
+      .then(r => {
+        if (!r.ok) return r.json().then(e => { throw new Error(e.detail || 'Erreur'); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.matches || data.matches.length === 0) {
+          statusEl.textContent = "Aucune photo trouvée pour l'instant. Réessayez plus tard, l'indexation continue.";
+          return;
+        }
+        currentMatches = data.matches;
+        statusEl.textContent = `${data.matches.length} photo(s) trouvée(s) :`;
+        downloadAllBtn.style.display = 'block';
+
+        data.matches.forEach(m => {
+          const filename = m.path.split('/').pop();
+
+          const card = document.createElement('div');
+          card.className = 'photo-card';
+
+          const img = document.createElement('img');
+          img.src = m.url;
+          card.appendChild(img);
+
+          const nameEl = document.createElement('div');
+          nameEl.className = 'filename';
+          nameEl.textContent = filename;
+          nameEl.title = filename;
+          card.appendChild(nameEl);
+
+          const dl = document.createElement('a');
+          dl.href = m.url;
+          dl.download = filename;
+          dl.className = 'dl-btn';
+          dl.textContent = 'Télécharger';
+          card.appendChild(dl);
+
+          gallery.appendChild(card);
+        });
+      })
+      .catch(err => { statusEl.textContent = err.message; });
+  }, 'image/jpeg', 0.9);
+};
+
+retryBtn.onclick = () => {
+  video.style.display = 'block';
+  canvas.style.display = 'none';
+  shootBtn.style.display = 'block';
+  retryBtn.style.display = 'none';
+  statusEl.textContent = '';
+  gallery.innerHTML = '';
+  downloadAllBtn.style.display = 'none';
+  currentMatches = [];
+};
+
+downloadAllBtn.onclick = () => {
+  if (currentMatches.length === 0) return;
+  downloadAllBtn.disabled = true;
+  downloadAllBtn.textContent = 'Préparation du ZIP...';
+
+  fetch('/zip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: currentMatches.map(m => m.path) }),
+  })
+    .then(r => {
+      if (!r.ok) throw new Error('Erreur lors de la création du ZIP.');
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mes_photos.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(err => { statusEl.textContent = err.message; })
+    .finally(() => {
+      downloadAllBtn.disabled = false;
+      downloadAllBtn.textContent = 'Télécharger toutes les photos (ZIP)';
+    });
+};
+</script>
+</body>
+</html>
